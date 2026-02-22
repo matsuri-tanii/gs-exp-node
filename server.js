@@ -61,63 +61,69 @@ app.get("/",(req, res) =>{
   res.send("<h1>おおほりは長野で研究しています</h1>");
 });
 
+// server.js に追加
+
 // ========================================
-// 投稿一覧取得 API
+// 投稿一覧取得 API（いいね対応版）
 // ========================================
-// GET /api/posts にアクセスしたときの処理
+// GET /api/posts
+// GET /api/posts?userId=xxx（いいね状態を取得する場合）
 
 app.get("/api/posts", async (req, res) => {
-  // async = この関数の中で await を使えるようにする
   try {
-    // try-catch = エラーが起きても安全に処理する
+    // クエリパラメータからユーザーIDを取得（任意）
+    const userId = req.query.userId;
 
     const posts = await prisma.post.findMany({
-      // prisma.post = Post テーブルを操作
-      // findMany() = 複数のデータを取得
       orderBy: { createdAt: "desc" },
-      // orderBy = 並び順を指定
-      // createdAt: "desc" = 作成日時の降順（新しい順）
+      include: {
+        // いいねの数を取得
+        _count: {
+          select: { likes: true },
+        },
+        // 現在のユーザーがいいねしているかどうか
+        likes: userId
+          ? {
+              where: { userId },
+              select: { id: true },
+            }
+          : false,
+      },
     });
 
-    res.json(posts);
-    // → 取得したデータをJSON形式で返す
+    // レスポンス用にデータを整形
+    const formattedPosts = posts.map((post) => ({
+      id: post.id,
+      content: post.content,
+      imageUrl: post.imageUrl,
+      userId: post.userId,
+      createdAt: post.createdAt,
+      updatedAt: post.updatedAt,
+      likeCount: post._count.likes,
+      isLiked: userId ? post.likes.length > 0 : false,
+    }));
 
+    res.json(formattedPosts);
   } catch (error) {
-    // エラーが発生した場合
-
     console.error("Error fetching posts:", error);
-    // → エラーログを出力（デバッグ用）
-
     res.status(500).json({ error: "投稿の取得に失敗しました" });
-    // → 500 = サーバーエラー
-    // → エラーメッセージを返す
   }
 });
 
 // ========================================
 // 投稿作成 API
 // ========================================
-// POST /api/posts にアクセスしたときの処理
+// POST /api/posts
 
-// ここからAPIを開発する流れをイメージしてもらいます🤗
 app.post("/api/posts", async (req, res) => {
   try {
-    // ここで送られたデータを受け取ります
     const { content, imageUrl, userId } = req.body;
-    // req.body = データの塊でAPIでデータが送られる場所になっています🤗そこから分割代入というjsのテクニックを使って抜き出しています🤗
-
-    // バリデーションのチェックをします！本当に送られてるの？？大丈夫？？ってものです🤗
 
     if (!content || content.trim() === "") {
-      // エラーを通知させます！そしてその結果をresponseとして返却しています🤗
-      return res.status(400).json({
-        error: "投稿の中身が空なので入力してください",
-      });
+      return res.status(400).json({ error: "投稿内容を入力してください" });
     }
 
-    // 登録の処理の場所です🤗prismaを使ってデータを実際に登録するフェースです🤗
     const post = await prisma.post.create({
-      // prismaの公式のお作法になっています🤗難しく考えないでください🤗
       data: {
         content: content.trim(),
         imageUrl: imageUrl || null,
@@ -125,54 +131,119 @@ app.post("/api/posts", async (req, res) => {
       },
     });
 
-    // この形式をDBに登録した後に成功したという結果をstatusでお知らせとデータを戻してくれる🤗
     res.status(201).json(post);
   } catch (error) {
-    // エラーの書き方は変わりませんのでテンプレと思ってください🤗
     console.error("Error creating post:", error);
     res.status(500).json({ error: "投稿の作成に失敗しました" });
   }
-
-  // この下は消さない
 });
 
 // ========================================
 // 投稿削除 API
 // ========================================
-// DELETE /api/posts/:id にアクセスしたときの処理
-// :id = パスパラメータ（URL の一部として ID を受け取る）
+// DELETE /api/posts/:id
 
 app.delete("/api/posts/:id", async (req, res) => {
   try {
     const id = parseInt(req.params.id);
-    // req.params = URL のパスパラメータ
-    // req.params.id = :id の部分の値
-    // parseInt() = 文字列を整数に変換（"1" → 1）
 
     if (isNaN(id)) {
-      // isNaN() = 数字でないかチェック
       return res.status(400).json({ error: "無効なIDです" });
     }
 
     await prisma.post.delete({
-      // prisma.post.delete() = データを削除
       where: { id },
-      // where = 条件を指定
-      // { id } = { id: id } の省略形（ES6）
     });
 
     res.json({ message: "投稿を削除しました" });
-
   } catch (error) {
     console.error("Error deleting post:", error);
 
     if (error.code === "P2025") {
-      // P2025 = Prisma のエラーコード（レコードが見つからない）
       return res.status(404).json({ error: "投稿が見つかりません" });
-      // → 404 = Not Found
     }
 
     res.status(500).json({ error: "投稿の削除に失敗しました" });
+  }
+});
+
+// ========================================
+// いいね追加 API【Day3 で追加】
+// ========================================
+// POST /api/posts/:id/like
+
+app.post("/api/posts/:id/like", async (req, res) => {
+  try {
+    const postId = parseInt(req.params.id);
+    const { userId } = req.body;
+
+    // バリデーション
+    if (isNaN(postId)) {
+      return res.status(400).json({ error: "無効な投稿IDです" });
+    }
+    if (!userId) {
+      return res.status(400).json({ error: "ユーザーIDが必要です" });
+    }
+
+    // いいねを作成
+    await prisma.like.create({
+      data: {
+        postId,
+        userId,
+      },
+    });
+
+    // いいね数を取得して返す
+    const likeCount = await prisma.like.count({
+      where: { postId },
+    });
+
+    res.status(201).json({ likeCount, isLiked: true });
+  } catch (error) {
+    // すでにいいねしている場合
+    if (error.code === "P2002") {
+      return res.status(400).json({ error: "すでにいいねしています" });
+    }
+    console.error("Error creating like:", error);
+    res.status(500).json({ error: "いいねに失敗しました" });
+  }
+});
+
+// ========================================
+// いいね削除 API【Day3 で追加】
+// ========================================
+// DELETE /api/posts/:id/like
+
+app.delete("/api/posts/:id/like", async (req, res) => {
+  try {
+    const postId = parseInt(req.params.id);
+    const { userId } = req.body;
+
+    // バリデーション
+    if (isNaN(postId)) {
+      return res.status(400).json({ error: "無効な投稿IDです" });
+    }
+    if (!userId) {
+      return res.status(400).json({ error: "ユーザーIDが必要です" });
+    }
+
+    // いいねを削除
+    await prisma.like.deleteMany({
+      where: {
+        postId,
+        userId,
+      },
+    });
+
+    // いいね数を取得して返す
+    const likeCount = await prisma.like.count({
+      where: { postId },
+    });
+
+    res.json({ likeCount, isLiked: false });
+  } catch (error) {
+    console.error("Error deleting like:", error);
+    res.status(500).json({ error: "いいねの削除に失敗しました" });
   }
 });
 
